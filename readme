@@ -1,0 +1,6 @@
+
+python .\core\train.py   # Eğitim kodu
+python .\core\test.py   # Eğitim kodu
+
+python sanal ortam (venv) nedir nasıl oluşturulur
+pip freeze > req.txt
