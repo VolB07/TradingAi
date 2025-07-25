@@ -1,0 +1,5 @@
+CNN Model Canlı Veri Test Sonuçları - 15m
+Orijinal Tahminler
+MAE: 725.2834
+RMSE: 881.4285
+R²: 0.9466

@@ -1,74 +1,109 @@
 import os
-import matplotlib.pyplot as plt
-import numpy as np
+import time
+import requests
 import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from tensorflow.keras.models import load_model
-from constants import Constants
-from utils.prepare_datasets import PrepareDatasets
+import tensorflow as tf
+import pickle
 
+# Klasör oluştur
+os.makedirs("result", exist_ok=True)
 
-class Test():
-    def __init__(self, model_path, dataset_file_path, save_path):
-        self.model_path = model_path
-        self.scaler = Constants.SCALER
-        self.sequence_length = Constants.SEQUENCE_LENGTH
-        self.dataset_file_path = dataset_file_path
-        self.prepare_datasets = PrepareDatasets(file_path=self.dataset_file_path)
-        self.crypto_prices = self.prepare_datasets.load_crypto_data_from_csv()
-        self.save_path = save_path
-        self.future_days = 30 * 24 * 4
+# Çoklu istekle geçmiş veri çekme
+def fetch_binance_klines(symbol="BTCUSDT", interval="15m", limit=1000, total=5000):
+    url = "https://api.binance.com/api/v3/klines"
+    all_data = []
+    end_time = int(time.time() * 1000)
 
-    def test_load_model(self):
-        _, _, X_test, _, _, _, _ = self.prepare_datasets.split_train_test()
-        model = load_model(self.model_path)
-        # 📈 Test verisi için tahmin yap
-        predictions = model.predict(X_test)
-        predictions_price = self.scaler.inverse_transform(predictions.reshape(-1, 1))
+    while len(all_data) < total:
+        params = {
+            "symbol": symbol,
+            "interval": interval,
+            "limit": limit,
+            "endTime": end_time
+        }
+        try:
+            response = requests.get(url, params=params, timeout=10)
+            data = response.json()
+            if not data or 'code' in data:
+                print(f"⚠️ Hata veya boş veri: {data}")
+                break
+            all_data = data + all_data  # Baştan ekle
+            end_time = data[0][0] - 1   # Önceki batch'in başından devam et
+            time.sleep(0.3)  # API limitine dikkat
+        except Exception as e:
+            print(f"⚠️ Veri çekme hatası: {e}")
+            break
 
-        # 📆 30 gün ileriye tahmin yap (15 dakikalık adımlarla)
-        # 30 gün * 24 saat * 4 (15 dakikalık adımlar)
-        future_predictions = []
-        last_sequence = X_test[-1].reshape(1, self.sequence_length, 1)
+    df = pd.DataFrame(all_data, columns=[
+        "open_time", "open", "high", "low", "close", "volume",
+        "close_time", "quote_asset_volume", "number_of_trades",
+        "taker_buy_base_asset_volume", "taker_buy_quote_asset_volume", "ignore"
+    ])
+    df["open_time"] = pd.to_datetime(df["open_time"], unit='ms')
+    df.set_index("open_time", inplace=True)
+    df["close"] = df["close"].astype(float)
+    return df[["close"]]
 
-        sayac=0
-        for _ in range(self.future_days):
-            sayac+=1
-            print(sayac)
-            next_pred = model.predict(last_sequence)[0, 0]
-            next_pred_original = self.scaler.inverse_transform([[next_pred]])[0, 0]
-            future_predictions.append(next_pred_original)
-            next_scaled = (next_pred_original - self.scaler.mean_[0]) / self.scaler.scale_[0]
-            last_sequence = np.roll(last_sequence, -1, axis=1)
-            last_sequence[0, -1, 0] = next_scaled
+# Model ve scaler dosya yolları
+model_path = r"C:\Users\VolB\PycharmProjects\TradingAi\core\models\cnn_model.h5"
+scaler_path = r"C:\Users\VolB\PycharmProjects\TradingAi\core\models\scaler.pkl"
 
-        # 📆 Gelecek tarihleri oluştur
-        future_dates = pd.date_range(self.crypto_prices.index[-1], periods=self.future_days + 1, freq='15T')[1:]
+# Model yükle
+model = load_model(model_path, custom_objects={'mse': tf.keras.losses.mse})
+print(f"✅ Model yüklendi: {model_path}")
 
-        # 📊 Grafik Çizimi
-        fig = plt.figure(figsize=(16, 9), dpi=200)
-        plt.plot(self.crypto_prices.index[-len(predictions):], self.crypto_prices['Close'][-len(predictions):],
-                 label="Gerçek Fiyat", color="royalblue", linewidth=2)
-        plt.plot(self.crypto_prices.index[-len(predictions):], predictions_price,
-                 label="Test Tahmini", linestyle="--", color="orange", linewidth=2)
-        plt.plot(future_dates, future_predictions,
-                 label="30 Günlük Tahmin", linestyle=":", color="red", linewidth=3)
+# Scaler yükle
+with open(scaler_path, "rb") as f:
+    scaler = pickle.load(f)
+print(f"✅ Scaler yüklendi: {scaler_path}")
 
-        plt.title("Bitcoin Fiyat Tahmini (15 Dakikalık Veri)", fontsize=18, fontweight='bold')
-        plt.xlabel("Tarih", fontsize=14)
-        plt.ylabel("Fiyat (USD)", fontsize=14)
-        plt.legend(fontsize=12, loc='upper left', frameon=False)
-        plt.grid(True, linestyle="--", alpha=0.5)
-        plt.xticks(rotation=45, ha='right', fontsize=12)
-        plt.yticks(fontsize=12)
-        plt.tight_layout()
+# 15 dakikalık veriyi çek ve test et
+interval = "15m"
+total_points = 2000
+print(f"\n⏳ {interval} verisi çekiliyor...")
+df_live = fetch_binance_klines(interval=interval, total=total_points)
+print(f"📈 Çekilen veri adedi: {len(df_live)}")
 
-        plt.savefig(self.save_path, dpi=300, bbox_inches="tight")
-        print(f"Grafik kaydedildi: {self.save_path}")
+close_prices = df_live[["close"]].values
+scaled = scaler.transform(close_prices)
+scaled = np.clip(scaled, -1.1, 1.1)
 
+window_size = 60
+X_live, y_live = [], []
+for i in range(len(scaled) - window_size):
+    X_live.append(scaled[i:i + window_size])
+    y_live.append(scaled[i + window_size])
+X_live = np.array(X_live)
+y_live = np.array(y_live)
 
-dataset_file_path = r"C:\Users\VolB\PycharmProjects\TradingAi\datasets\btc_15m_data_2018_to_2025.csv"
-Test(
-    model_path=os.path.join("models", "bitcoin_price_lstm_15m_model1.h5"),
-    dataset_file_path=dataset_file_path,
-    save_path=r"C:\Users\VolB\PycharmProjects\TradingAi\results\test.png"
-).test_load_model()
+predicted_scaled = model.predict(X_live, verbose=0)
+predicted_price = scaler.inverse_transform(predicted_scaled)
+actual_price = scaler.inverse_transform(y_live.reshape(-1, 1))
+
+mae = mean_absolute_error(actual_price, predicted_price)
+rmse = np.sqrt(mean_squared_error(actual_price, predicted_price))
+r2 = r2_score(actual_price, predicted_price)
+
+print(f"📊 {interval} Orijinal Tahmin - MAE: {mae:.4f}, RMSE: {rmse:.4f}, R²: {r2:.4f}")
+
+plt.figure(figsize=(12, 6))
+plt.plot(actual_price, label='Gerçek Fiyat')
+plt.plot(predicted_price, label='Tahmin')
+plt.title(f'CNN Model - Canlı BTC/USDT Tahmin ({interval})')
+plt.xlabel("Zaman")
+plt.ylabel("Fiyat")
+plt.legend()
+plt.tight_layout()
+plt.savefig("result/cnn_model_live_test_results_15m.png")
+plt.close()
+print("✅ Grafik kaydedildi: result/cnn_model_live_test_results_15m.png")
+
+with open("result/test_results_15m.txt", "w", encoding="utf-8") as f:
+    f.write(f"CNN Model Canlı Veri Test Sonuçları - {interval}\n")
+    f.write(f"Orijinal Tahminler\nMAE: {mae:.4f}\nRMSE: {rmse:.4f}\nR²: {r2:.4f}\n")
+print("✅ Performans metrikleri kaydedildi: result/test_results_15m.txt")

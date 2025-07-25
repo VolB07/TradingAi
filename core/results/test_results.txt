@@ -1,0 +1,4 @@
+CNN Model Test Sonuçları
+MAE: 623.6796
+RMSE: 846.8297
+R²: 0.9980
